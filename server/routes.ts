@@ -32,6 +32,7 @@ import {
   ALLOWED_STEPS,
   type BondProcessStep
 } from "./services/documentEngineService";
+import { createTradeFromAuction } from "./services/tradeService";
 import { auctions, auctionBids, suretyTrusts, suretyCases, suretyCollateral, bondProcessDocuments } from "@shared/schema";
 import { eq, desc, and, lt, gt } from "drizzle-orm";
 import bcrypt from "bcryptjs";
@@ -1341,6 +1342,150 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Enhanced underwriting routes with risk scoring and probability modeling
+  const riskFactorsSchema = z.object({
+    claimToAssetRatio: z.number().min(0).max(200),
+    collectionProbability: z.number().min(0).max(100),
+    debtorFinancialHealth: z.number().min(0).max(100),
+    assetLiquidity: z.number().min(0).max(100),
+    lienPositionStrength: z.number().min(0).max(100),
+    jurisdictionFavorability: z.number().min(0).max(100),
+    documentationQuality: z.number().min(0).max(100),
+    marketConditions: z.number().min(0).max(100),
+    industryRisk: z.number().min(0).max(100),
+    economicConditions: z.number().min(0).max(100),
+  });
+
+  // POST /api/underwriting/cases/:id/risk-score - Calculate risk score
+  app.post("/api/underwriting/cases/:id/risk-score", authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const caseId = parseInt(req.params.id);
+      if (isNaN(caseId)) {
+        return res.status(400).json({ error: "Invalid case ID" });
+      }
+
+      const validation = riskFactorsSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({ error: "Invalid risk factors", details: validation.error });
+      }
+
+      const { calculateRiskScore, runMonteCarloSimulation } = await import("./services/underwritingEnhancedService");
+      
+      const result = calculateRiskScore(validation.data);
+      result.monteCarloResults = runMonteCarloSimulation(result.recoveryProbability, 0.25 - (result.confidence * 0.1));
+
+      res.json({
+        riskScore: result,
+        monteCarlo: result.monteCarloResults,
+      });
+    } catch (error) {
+      console.error("Calculate risk score error:", error);
+      res.status(500).json({ error: "Failed to calculate risk score" });
+    }
+  });
+
+  // POST /api/underwriting/cases/:id/report - Generate comprehensive report
+  app.get("/api/underwriting/cases/:id/report", authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const caseId = parseInt(req.params.id);
+      if (isNaN(caseId)) {
+        return res.status(400).json({ error: "Invalid case ID" });
+      }
+
+      const { generateUnderwritingReport } = await import("./services/underwritingEnhancedService");
+      const report = await generateUnderwritingReport(caseId);
+
+      if (!report) {
+        return res.status(404).json({ error: "Case not found" });
+      }
+
+      res.json({ report });
+    } catch (error) {
+      console.error("Generate underwriting report error:", error);
+      res.status(500).json({ error: "Failed to generate report" });
+    }
+  });
+
+  // GET /api/underwriting/portfolio/summary - Portfolio-level view
+  app.get("/api/underwriting/portfolio/summary", authMiddleware, async (_req: AuthRequest, res) => {
+    try {
+      const { getPortfolioUnderwritingSummary } = await import("./services/underwritingEnhancedService");
+      const summary = await getPortfolioUnderwritingSummary();
+      res.json({ summary });
+    } catch (error) {
+      console.error("Get portfolio summary error:", error);
+      res.status(500).json({ error: "Failed to get portfolio summary" });
+    }
+  });
+
+  // POST /api/underwriting/analyze - Quick analysis endpoint
+  const quickAnalysisSchema = z.object({
+    claimAmount: z.number().positive(),
+    attachedAssetsValue: z.number().min(0),
+    vassaleesAnnualRevenue: z.number().min(0),
+    riskManagementCoverage: z.number().min(0),
+    parties: z.array(z.object({
+      expectedCollectionPct: z.number().min(0).max(100).optional(),
+    })).optional(),
+  });
+
+  app.post("/api/underwriting/analyze", authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const validation = quickAnalysisSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({ error: "Invalid input", details: validation.error });
+      }
+
+      const { computeUnderwritingMetrics } = await import("./services/underwritingService");
+      const { calculateRiskScore, runMonteCarloSimulation } = await import("./services/underwritingEnhancedService");
+
+      const caseInput = {
+        title: "Quick Analysis",
+        primaryDebtorName: "",
+        claimAmount: validation.data.claimAmount,
+        attachedAssetsValue: validation.data.attachedAssetsValue,
+        vassaleesAnnualRevenue: validation.data.vassaleesAnnualRevenue,
+        riskManagementCoverage: validation.data.riskManagementCoverage,
+      };
+
+      const parties = validation.data.parties?.map(p => ({
+        name: "",
+        role: "other" as const,
+        expectedCollectionPct: p.expectedCollectionPct ?? 50,
+      })) || [];
+
+      const metrics = computeUnderwritingMetrics(caseInput, parties);
+
+      // Quick risk factors based on input
+      const factors = {
+        claimToAssetRatio: validation.data.claimAmount / Math.max(1, validation.data.attachedAssetsValue) * 100,
+        collectionProbability: parties.length > 0 
+          ? parties.reduce((sum, p) => sum + (p.expectedCollectionPct || 50), 0) / parties.length
+          : 50,
+        debtorFinancialHealth: 50,
+        assetLiquidity: 50,
+        lienPositionStrength: 50,
+        jurisdictionFavorability: 50,
+        documentationQuality: 50,
+        marketConditions: 50,
+        industryRisk: 50,
+        economicConditions: 50,
+      };
+
+      const riskScore = calculateRiskScore(factors);
+      riskScore.monteCarloResults = runMonteCarloSimulation(riskScore.recoveryProbability);
+
+      res.json({
+        metrics,
+        riskScore,
+        monteCarlo: riskScore.monteCarloResults,
+      });
+    } catch (error) {
+      console.error("Quick analysis error:", error);
+      res.status(500).json({ error: "Failed to analyze" });
+    }
+  });
+
   // ===== INVESTOR MEMBERSHIP ROUTES =====
   
   // GET /api/investor/membership/prices - Get membership prices
@@ -1676,9 +1821,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
           })
           .where(eq(auctions.id, auction.id));
 
+        // Create trade record for settlement flow
+        const trade = await createTradeFromAuction(auction.id);
+
         return res.json({
           bid,
-          message: "Reserve met. Auction completed. You are the winning bidder.",
+          message: "Reserve met. Auction completed. Trade created for settlement.",
+          trade: trade ? {
+            id: trade.id,
+            status: trade.status,
+            amount: trade.amount,
+          } : null,
         });
       }
 
@@ -1914,6 +2067,166 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Update document error:", error);
       res.status(500).json({ error: "Failed to update document" });
+    }
+  });
+
+  // ===== DOCUMENT ENGINE ENHANCEMENTS - DUE DILIGENCE & EMAIL =====
+
+  // GET /api/bonds/:id/due-diligence - Generate due diligence pack metadata
+  app.get("/api/bonds/:id/due-diligence", authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const bondId = parseInt(req.params.id);
+      if (isNaN(bondId)) {
+        return res.status(400).json({ error: "Invalid bond ID" });
+      }
+
+      const { generateDueDiligencePack } = await import("./services/documentEmailService");
+      const pack = await generateDueDiligencePack(bondId);
+
+      if (!pack) {
+        return res.status(404).json({ error: "Bond not found" });
+      }
+
+      res.json({ 
+        metadata: pack.metadata,
+        documents: pack.documents.map(d => ({
+          name: d.name,
+          type: d.type,
+          size: d.size,
+          summary: d.summary,
+        })),
+        generatedAt: pack.generatedAt,
+      });
+    } catch (error) {
+      console.error("Get due diligence error:", error);
+      res.status(500).json({ error: "Failed to generate due diligence pack" });
+    }
+  });
+
+  // POST /api/bonds/:id/due-diligence/zip - Generate ZIP file of due diligence pack
+  app.post("/api/bonds/:id/due-diligence/zip", authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const bondId = parseInt(req.params.id);
+      if (isNaN(bondId)) {
+        return res.status(400).json({ error: "Invalid bond ID" });
+      }
+
+      const { createDueDiligenceZip } = await import("./services/documentEmailService");
+      const zipPath = await createDueDiligenceZip(bondId);
+
+      if (!zipPath) {
+        return res.status(404).json({ error: "Bond not found" });
+      }
+
+      res.json({ 
+        message: "Due diligence ZIP created",
+        zipPath,
+        downloadUrl: `/api/admin/bonds/${bondId}/due-diligence/download`,
+      });
+    } catch (error) {
+      console.error("Create due diligence ZIP error:", error);
+      res.status(500).json({ error: "Failed to create ZIP" });
+    }
+  });
+
+  // POST /api/bonds/:id/due-diligence/send - Email due diligence pack to investor
+  app.post("/api/bonds/:id/due-diligence/send", authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const bondId = parseInt(req.params.id);
+      if (isNaN(bondId)) {
+        return res.status(400).json({ error: "Invalid bond ID" });
+      }
+
+      const { investorEmail, investorName } = req.body;
+      if (!investorEmail || !investorName) {
+        return res.status(400).json({ error: "investorEmail and investorName required" });
+      }
+
+      const { generateDueDiligencePack, createDueDiligenceZip, sendDueDiligencePack } = 
+        await import("./services/documentEmailService");
+
+      const pack = await generateDueDiligencePack(bondId);
+      if (!pack) {
+        return res.status(404).json({ error: "Bond not found" });
+      }
+
+      const zipPath = await createDueDiligenceZip(bondId);
+      if (!zipPath) {
+        return res.status(500).json({ error: "Failed to create ZIP" });
+      }
+
+      const emailMessage = sendDueDiligencePack(
+        investorEmail,
+        investorName,
+        pack.bondName,
+        zipPath
+      );
+
+      const result = await sendEmail(emailMessage);
+
+      res.json({ 
+        message: "Due diligence package sent",
+        messageId: result.messageId,
+      });
+    } catch (error: any) {
+      console.error("Send due diligence error:", error);
+      res.status(500).json({ error: error.message || "Failed to send due diligence" });
+    }
+  });
+
+  // POST /api/admin/email/send - Send ad-hoc email
+  const adHocEmailSchema = z.object({
+    to: z.string().email(),
+    subject: z.string().min(1),
+    html: z.string().min(1),
+  });
+
+  app.post("/api/admin/email/send", adminAuthMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const validation = adHocEmailSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({ error: "Invalid email data", details: validation.error });
+      }
+
+      const result = await sendEmail(validation.data);
+      res.json({ 
+        success: true,
+        messageId: result.messageId,
+      });
+    } catch (error: any) {
+      console.error("Send email error:", error);
+      res.status(500).json({ error: error.message || "Failed to send email" });
+    }
+  });
+
+  // GET /api/admin/email/queue - Get email queue status
+  app.get("/api/admin/email/queue", adminAuthMiddleware, async (_req: AuthRequest, res) => {
+    try {
+      const queue = getEmailQueue();
+      res.json({
+        total: queue.length,
+        pending: queue.filter(e => e.status === "PENDING").length,
+        sent: queue.filter(e => e.status === "SENT").length,
+        failed: queue.filter(e => e.status === "FAILED").length,
+        queue: queue.slice(-20), // Last 20 items
+      });
+    } catch (error) {
+      console.error("Get email queue error:", error);
+      res.status(500).json({ error: "Failed to get email queue" });
+    }
+  });
+
+  // POST /api/admin/email/process-queue - Process pending emails
+  app.post("/api/admin/email/process-queue", adminAuthMiddleware, async (_req: AuthRequest, res) => {
+    try {
+      const result = await processEmailQueue();
+      res.json({ 
+        processed: result.processed,
+        failed: result.failed,
+      });
+    } catch (error: any) {
+      console.error("Process email queue error:", error);
+      res.status(500).json({ error: error.message || "Failed to process queue" });
     }
   });
 
@@ -2208,6 +2521,639 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Release surety case error:", error);
       res.status(500).json({ error: "Failed to release surety case" });
+    }
+  });
+
+  // Enhanced surety routes - Claims, Reconciliations, and Reporting
+  const claimSchema = z.object({
+    claimType: z.enum(["PRINCIPAL_DEFAULT", "INTEREST_DEFAULT", "CUSTOMER_CLAIM", "REGULATORY_FINE", "OTHER"]),
+    claimAmount: z.number().positive(),
+    claimDescription: z.string().min(1),
+    claimantName: z.string().min(1),
+    incidentDate: z.string().optional(),
+    filedDate: z.string().optional(),
+  });
+
+  // POST /api/admin/surety/claims - File a surety claim
+  app.post("/api/admin/surety/cases/:id/claims", adminAuthMiddleware, suretyPinMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const caseId = parseInt(req.params.id);
+      if (isNaN(caseId)) {
+        return res.status(400).json({ error: "Invalid case ID" });
+      }
+
+      const validation = claimSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({ error: "Invalid claim data", details: validation.error });
+      }
+
+      const { fileSuretyClaim } = await import("./services/suretyEnhancedService");
+      const claim = await fileSuretyClaim({
+        caseId,
+        claimType: validation.data.claimType,
+        claimAmount: validation.data.claimAmount,
+        claimDescription: validation.data.claimDescription,
+        claimantName: validation.data.claimantName,
+        incidentDate: validation.data.incidentDate ? new Date(validation.data.incidentDate) : undefined,
+        filedDate: validation.data.filedDate ? new Date(validation.data.filedDate) : undefined,
+      });
+
+      res.status(201).json({ claim, message: "Claim filed successfully" });
+    } catch (error: any) {
+      console.error("File claim error:", error);
+      res.status(400).json({ error: error.message || "Failed to file claim" });
+    }
+  });
+
+  // GET /api/admin/surety/cases/:id/claims - Get claims for a case
+  app.get("/api/admin/surety/cases/:id/claims", adminAuthMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const caseId = parseInt(req.params.id);
+      if (isNaN(caseId)) {
+        return res.status(400).json({ error: "Invalid case ID" });
+      }
+
+      const { getSuretyClaims } = await import("./services/suretyEnhancedService");
+      const claims = await getSuretyClaims(caseId);
+      res.json({ claims });
+    } catch (error) {
+      console.error("Get claims error:", error);
+      res.status(500).json({ error: "Failed to get claims" });
+    }
+  });
+
+  // POST /api/admin/surety/claims/:id/approve - Approve and pay a claim
+  app.post("/api/admin/surety/claims/:id/approve", adminAuthMiddleware, suretyPinMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const claimId = parseInt(req.params.id);
+      const { paidAmount } = req.body;
+
+      if (!paidAmount || paidAmount <= 0) {
+        return res.status(400).json({ error: "Valid paidAmount required" });
+      }
+
+      const { approveSuretyClaim } = await import("./services/suretyEnhancedService");
+      const claim = await approveSuretyClaim(claimId, paidAmount);
+
+      if (!claim) {
+        return res.status(404).json({ error: "Claim not found" });
+      }
+
+      res.json({ claim, message: "Claim approved and paid" });
+    } catch (error: any) {
+      console.error("Approve claim error:", error);
+      res.status(400).json({ error: error.message || "Failed to approve claim" });
+    }
+  });
+
+  // POST /api/admin/surety/trusts/:id/reconcile - Run reconciliation for a trust
+  app.post("/api/admin/surety/trusts/:id/reconcile", adminAuthMiddleware, suretyPinMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const trustId = parseInt(req.params.id);
+      if (isNaN(trustId)) {
+        return res.status(400).json({ error: "Invalid trust ID" });
+      }
+
+      const { periodStart, periodEnd } = req.body;
+      if (!periodStart || !periodEnd) {
+        return res.status(400).json({ error: "periodStart and periodEnd required" });
+      }
+
+      const { createReconciliation } = await import("./services/suretyEnhancedService");
+      const reconciliation = await createReconciliation(
+        trustId,
+        new Date(periodStart),
+        new Date(periodEnd)
+      );
+
+      res.json({ reconciliation });
+    } catch (error: any) {
+      console.error("Create reconciliation error:", error);
+      res.status(400).json({ error: error.message || "Failed to create reconciliation" });
+    }
+  });
+
+  // GET /api/admin/surety/trusts/:id/reconciliations - Get reconciliations for a trust
+  app.get("/api/admin/surety/trusts/:id/reconciliations", adminAuthMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const trustId = parseInt(req.params.id);
+      if (isNaN(trustId)) {
+        return res.status(400).json({ error: "Invalid trust ID" });
+      }
+
+      const { getReconciliations } = await import("./services/suretyEnhancedService");
+      const reconciliations = await getReconciliations(trustId);
+      res.json({ reconciliations });
+    } catch (error) {
+      console.error("Get reconciliations error:", error);
+      res.status(500).json({ error: "Failed to get reconciliations" });
+    }
+  });
+
+  // GET /api/admin/surety/trusts/:id/exposure - Get detailed exposure report for a trust
+  app.get("/api/admin/surety/trusts/:id/exposure", adminAuthMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const trustId = parseInt(req.params.id);
+      if (isNaN(trustId)) {
+        return res.status(400).json({ error: "Invalid trust ID" });
+      }
+
+      const { generateTrustExposureReport } = await import("./services/suretyEnhancedService");
+      const report = await generateTrustExposureReport(trustId);
+
+      if (!report) {
+        return res.status(404).json({ error: "Trust not found" });
+      }
+
+      res.json({ report });
+    } catch (error) {
+      console.error("Generate exposure report error:", error);
+      res.status(500).json({ error: "Failed to generate exposure report" });
+    }
+  });
+
+  // GET /api/admin/surety/portfolio - Get portfolio-level surety summary
+  app.get("/api/admin/surety/portfolio", adminAuthMiddleware, async (_req: AuthRequest, res) => {
+    try {
+      const { getSuretyPortfolioReport } = await import("./services/suretyEnhancedService");
+      const report = await getSuretyPortfolioReport();
+      res.json({ report });
+    } catch (error) {
+      console.error("Get portfolio report error:", error);
+      res.status(500).json({ error: "Failed to get portfolio report" });
+    }
+  });
+
+  // ===== TRADE AND SETTLEMENT ROUTES =====
+  // Trade routes for bond purchase settlement flow
+
+  // GET /api/investor/trades - List trades for the logged-in investor
+  app.get("/api/investor/trades", investorAuthMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const investorId = req.user!.id;
+      const { status } = req.query;
+
+      // For now, return mock data structure (replace with DB query when table is migrated)
+      const trades = await import("./services/tradeService").then(m => m.getTradesByInvestor(investorId));
+      
+      res.json({ 
+        trades: trades.map(t => ({
+          id: t.id,
+          auctionId: t.auctionId,
+          bondId: t.bondId,
+          amount: t.amount,
+          status: t.status,
+          createdAt: t.createdAt,
+        }))
+      });
+    } catch (error) {
+      console.error("Get trades error:", error);
+      res.status(500).json({ error: "Failed to get trades" });
+    }
+  });
+
+  // GET /api/investor/trades/:id - Get trade details
+  app.get("/api/investor/trades/:id", investorAuthMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const tradeId = parseInt(req.params.id);
+      if (isNaN(tradeId)) {
+        return res.status(400).json({ error: "Invalid trade ID" });
+      }
+
+      const trade = await import("./services/tradeService").then(m => m.getTradeById(tradeId));
+      if (!trade) {
+        return res.status(404).json({ error: "Trade not found" });
+      }
+
+      // Verify investor owns this trade
+      if (trade.investorId !== req.user!.id) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+
+      res.json({ trade });
+    } catch (error) {
+      console.error("Get trade error:", error);
+      res.status(500).json({ error: "Failed to get trade" });
+    }
+  });
+
+  // POST /api/investor/trades/:id/checkout - Create Stripe checkout for bond purchase
+  app.post("/api/investor/trades/:id/checkout", investorAuthMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const tradeId = parseInt(req.params.id);
+      if (isNaN(tradeId)) {
+        return res.status(400).json({ error: "Invalid trade ID" });
+      }
+
+      const trade = await import("./services/tradeService").then(m => m.getTradeById(tradeId));
+      if (!trade) {
+        return res.status(404).json({ error: "Trade not found" });
+      }
+
+      // Verify investor owns this trade
+      if (trade.investorId !== req.user!.id) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+
+      if (trade.status !== "PENDING") {
+        return res.status(400).json({ error: "Trade is not pending checkout" });
+      }
+
+      // Get bond details
+      const [bond] = await db
+        .select({ name: bonds.name })
+        .from(bonds)
+        .where(eq(bonds.id, trade.bondId));
+
+      // Create Stripe checkout session
+      const stripe = await getUncachableStripeClient();
+      
+      const baseUrl = process.env.REPLIT_DOMAINS?.split(",")[0] 
+        ? `https://${process.env.REPLIT_DOMAINS.split(",")[0]}`
+        : `http://localhost:5000`;
+
+      const session = await stripe.checkout.sessions.create({
+        mode: "payment",
+        payment_method_types: ["card"],
+        line_items: [
+          {
+            price_data: {
+              currency: "usd",
+              product_data: {
+                name: bond?.name || "Judgment Bond",
+                description: `Purchase of bond for $${trade.amount}`,
+              },
+              unit_amount: Math.round(parseFloat(trade.amount) * 100), // Convert to cents
+            },
+            quantity: 1,
+          },
+        ],
+        metadata: {
+          tradeId: String(tradeId),
+          purpose: "bond_purchase",
+          bondId: String(trade.bondId),
+          investorId: String(trade.investorId),
+        },
+        success_url: `${baseUrl}/exchange/settlement?trade_id=${tradeId}&session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${baseUrl}/exchange/auctions`,
+      });
+
+      // Update trade with checkout session ID
+      await import("./services/tradeService").then(m => 
+        m.updateTradeStatus(tradeId, "PENDING", { checkoutSessionId: session.id })
+      );
+
+      res.json({ 
+        checkoutUrl: session.url,
+        sessionId: session.id,
+        message: "Redirect to payment to complete purchase"
+      });
+    } catch (error: any) {
+      console.error("Checkout error:", error);
+      res.status(500).json({ error: error.message || "Failed to create checkout session" });
+    }
+  });
+
+  // POST /api/investor/trades/:id/settle - Manually settle a trade (for testing)
+  app.post("/api/investor/trades/:id/settle", investorAuthMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const tradeId = parseInt(req.params.id);
+      if (isNaN(tradeId)) {
+        return res.status(400).json({ error: "Invalid trade ID" });
+      }
+
+      const trade = await import("./services/tradeService").then(m => m.getTradeById(tradeId));
+      if (!trade) {
+        return res.status(404).json({ error: "Trade not found" });
+      }
+
+      // Verify investor owns this trade
+      if (trade.investorId !== req.user!.id) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+
+      // Update trade to PAID
+      await import("./services/tradeService").then(m => 
+        m.updateTradeStatus(tradeId, "PAID", { paymentIntentId: `manual-${Date.now()}` })
+      );
+
+      // Get investor details
+      const [investor] = await db
+        .select({ email: users.email, name: users.name })
+        .from(users)
+        .where(eq(users.id, trade.investorId));
+
+      const [bond] = await db
+        .select({ name: bonds.name })
+        .from(bonds)
+        .where(eq(bonds.id, trade.bondId));
+
+      // Create settlement and ledger entries
+      const settlement = await import("./services/tradeService").then(m => 
+        m.createSettlement(tradeId, investor?.email || "", investor?.name || "", bond?.name || "")
+      );
+
+      res.json({ 
+        message: "Trade settled successfully",
+        tradeId,
+        settlementId: settlement?.settlementId,
+        journalId: settlement?.journalId
+      });
+    } catch (error: any) {
+      console.error("Settle error:", error);
+      res.status(500).json({ error: error.message || "Failed to settle trade" });
+    }
+  });
+
+  // ===== LEDGER AND AUDIT ROUTES =====
+  // These routes support the compliance spine
+
+  // GET /api/admin/ledger/trial-balance - Get trial balance report
+  app.get("/api/admin/ledger/trial-balance", adminAuthMiddleware, async (_req: AuthRequest, res) => {
+    try {
+      const { getTrialBalance, verifyLedgerIntegrity } = await import("./services/ledgerService");
+      const trialBalance = await getTrialBalance();
+      const verification = await verifyLedgerIntegrity();
+
+      res.json({ 
+        trialBalance,
+        isValid: verification.valid,
+        issues: verification.issues
+      });
+    } catch (error) {
+      console.error("Get trial balance error:", error);
+      res.status(500).json({ error: "Failed to get trial balance" });
+    }
+  });
+
+  // GET /api/admin/ledger/journal - Get journal entries
+  app.get("/api/admin/ledger/journal", adminAuthMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const { type, startDate, endDate } = req.query;
+      
+      const { getJournalEntries } = await import("./services/ledgerService");
+      const entries = await getJournalEntries({
+        type: type as string,
+        startDate: startDate ? new Date(startDate as string) : undefined,
+        endDate: endDate ? new Date(endDate as string) : undefined,
+      });
+
+      res.json({ journalEntries: entries });
+    } catch (error) {
+      console.error("Get journal entries error:", error);
+      res.status(500).json({ error: "Failed to get journal entries" });
+    }
+  });
+
+  // GET /api/admin/audit/events - Get immutable event log
+  app.get("/api/admin/audit/events", adminAuthMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const { entityType, entityId, correlationId } = req.query;
+      
+      const { getEventChain, getEventsByEntity, getEventsByCorrelation } = await import("./services/immutableEventService");
+
+      let events;
+      if (correlationId) {
+        events = await getEventsByCorrelation(correlationId as string);
+      } else if (entityType && entityId) {
+        events = await getEventsByEntity(entityType as string, entityId as string);
+      } else {
+        events = await getEventChain();
+      }
+
+      res.json({ events });
+    } catch (error) {
+      console.error("Get events error:", error);
+      res.status(500).json({ error: "Failed to get events" });
+    }
+  });
+
+  // POST /api/admin/audit/verify-chain - Verify hash chain integrity
+  app.post("/api/admin/audit/verify-chain", adminAuthMiddleware, async (_req: AuthRequest, res) => {
+    try {
+      const { verifyEventChain } = await import("./services/immutableEventService");
+      const { verifyLedgerIntegrity } = await import("./services/ledgerService");
+
+      const [eventResult, ledgerResult] = await Promise.all([
+        verifyEventChain(),
+        verifyLedgerIntegrity(),
+      ]);
+
+      res.json({
+        events: {
+          valid: eventResult.valid,
+          brokenAt: eventResult.brokenAt,
+        },
+        ledger: {
+          valid: ledgerResult.valid,
+          issues: ledgerResult.issues,
+        },
+      });
+    } catch (error) {
+      console.error("Verify chain error:", error);
+      res.status(500).json({ error: "Failed to verify chains" });
+    }
+  });
+
+  // ===== ASSIGNMENT & RIGHTS TRANSFER ROUTES =====
+
+  // GET /api/investor/holdings - Get investor's bond holdings
+  app.get("/api/investor/holdings", investorAuthMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const { getInvestorHoldings } = await import("./services/assignmentService");
+      const holdings = await getInvestorHoldings(req.user!.id);
+      res.json({ holdings });
+    } catch (error) {
+      console.error("Get holdings error:", error);
+      res.status(500).json({ error: "Failed to get holdings" });
+    }
+  });
+
+  // GET /api/bonds/:id/cap-table - Get bond ownership cap table
+  app.get("/api/bonds/:id/cap-table", authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const bondId = parseInt(req.params.id);
+      if (isNaN(bondId)) {
+        return res.status(400).json({ error: "Invalid bond ID" });
+      }
+
+      const { getCapTable } = await import("./services/assignmentService");
+      const capTable = await getCapTable(bondId);
+      
+      if (!capTable) {
+        return res.status(404).json({ error: "Bond not found" });
+      }
+
+      res.json({ capTable });
+    } catch (error) {
+      console.error("Get cap table error:", error);
+      res.status(500).json({ error: "Failed to get cap table" });
+    }
+  });
+
+  // POST /api/investor/assignments/:id/transfer - Request assignment transfer
+  const transferSchema = z.object({
+    toInvestorId: z.number(),
+    transferPercent: z.number().min(0.01).max(100),
+    transferAmount: z.number().positive(),
+  });
+
+  app.post("/api/investor/assignments/:id/transfer", investorAuthMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const assignmentId = parseInt(req.params.id);
+      if (isNaN(assignmentId)) {
+        return res.status(400).json({ error: "Invalid assignment ID" });
+      }
+
+      const validation = transferSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({ error: "Invalid transfer parameters", details: validation.error });
+      }
+
+      const { requestTransfer } = await import("./services/assignmentService");
+      const transfer = await requestTransfer({
+        assignmentId,
+        fromInvestorId: req.user!.id,
+        toInvestorId: validation.data.toInvestorId,
+        transferPercent: validation.data.transferPercent,
+        transferAmount: validation.data.transferAmount,
+      });
+
+      res.json({ 
+        transfer,
+        message: "Transfer request submitted"
+      });
+    } catch (error: any) {
+      console.error("Transfer request error:", error);
+      res.status(400).json({ error: error.message || "Failed to request transfer" });
+    }
+  });
+
+  // GET /api/investor/transfers/pending - Get pending transfers
+  app.get("/api/investor/transfers/pending", investorAuthMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const { getPendingTransfers } = await import("./services/assignmentService");
+      const transfers = await getPendingTransfers(req.user!.id);
+      res.json({ transfers });
+    } catch (error) {
+      console.error("Get pending transfers error:", error);
+      res.status(500).json({ error: "Failed to get pending transfers" });
+    }
+  });
+
+  // POST /api/admin/transfers/:id/execute - Execute approved transfer
+  app.post("/api/admin/transfers/:id/execute", adminAuthMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const transferId = parseInt(req.params.id);
+      if (isNaN(transferId)) {
+        return res.status(400).json({ error: "Invalid transfer ID" });
+      }
+
+      const { executeTransfer } = await import("./services/assignmentService");
+      const success = await executeTransfer(transferId);
+
+      if (!success) {
+        return res.status(400).json({ error: "Transfer cannot be executed" });
+      }
+
+      res.json({ message: "Transfer executed successfully" });
+    } catch (error: any) {
+      console.error("Execute transfer error:", error);
+      res.status(400).json({ error: error.message || "Failed to execute transfer" });
+    }
+  });
+
+  // ===== DISTRIBUTION ROUTES =====
+
+  // POST /api/admin/bonds/:id/receipt - Record receipt for distribution
+  const receiptSchema = z.object({
+    amount: z.number().positive(),
+    description: z.string().min(1),
+    receivedAt: z.string().optional(),
+  });
+
+  app.post("/api/admin/bonds/:id/receipt", adminAuthMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const bondId = parseInt(req.params.id);
+      if (isNaN(bondId)) {
+        return res.status(400).json({ error: "Invalid bond ID" });
+      }
+
+      const validation = receiptSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({ error: "Invalid receipt parameters", details: validation.error });
+      }
+
+      const { recordReceipt } = await import("./services/distributionService");
+      const distribution = await recordReceipt({
+        bondId,
+        amount: validation.data.amount,
+        description: validation.data.description,
+        receivedAt: validation.data.receivedAt ? new Date(validation.data.receivedAt) : undefined,
+      });
+
+      res.json({ 
+        distribution,
+        message: "Receipt recorded successfully"
+      });
+    } catch (error: any) {
+      console.error("Record receipt error:", error);
+      res.status(400).json({ error: error.message || "Failed to record receipt" });
+    }
+  });
+
+  // POST /api/admin/distributions/:id/execute - Execute distribution to investors
+  app.post("/api/admin/distributions/:id/execute", adminAuthMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const distributionId = parseInt(req.params.id);
+      if (isNaN(distributionId)) {
+        return res.status(400).json({ error: "Invalid distribution ID" });
+      }
+
+      const { executeDistribution } = await import("./services/distributionService");
+      const result = await executeDistribution(distributionId);
+
+      res.json({ 
+        message: "Distribution executed successfully",
+        distribution: result.distribution,
+        payouts: result.payouts,
+      });
+    } catch (error: any) {
+      console.error("Execute distribution error:", error);
+      res.status(400).json({ error: error.message || "Failed to execute distribution" });
+    }
+  });
+
+  // GET /api/bonds/:id/distributions - Get distribution history for a bond
+  app.get("/api/bonds/:id/distributions", authMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const bondId = parseInt(req.params.id);
+      if (isNaN(bondId)) {
+        return res.status(400).json({ error: "Invalid bond ID" });
+      }
+
+      const { getBondDistributions, getDistributionReport } = await import("./services/distributionService");
+      const [distributions, report] = await Promise.all([
+        getBondDistributions(bondId),
+        getDistributionReport(bondId),
+      ]);
+
+      res.json({ distributions, report });
+    } catch (error) {
+      console.error("Get distributions error:", error);
+      res.status(500).json({ error: "Failed to get distributions" });
+    }
+  });
+
+  // GET /api/investor/distributions - Get investor's distribution history
+  app.get("/api/investor/distributions", investorAuthMiddleware, async (req: AuthRequest, res) => {
+    try {
+      const { getInvestorDistributions } = await import("./services/distributionService");
+      const distributions = await getInvestorDistributions(req.user!.id);
+      res.json({ distributions });
+    } catch (error) {
+      console.error("Get investor distributions error:", error);
+      res.status(500).json({ error: "Failed to get distributions" });
     }
   });
 

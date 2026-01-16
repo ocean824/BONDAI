@@ -304,6 +304,138 @@ export const bondProcessDocuments = pgTable("bond_process_documents", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+// ===== EXCHANGE SETTLEMENT TABLES =====
+// Trade records for bond purchases
+export const exchangeTrades = pgTable("exchange_trades", {
+  id: serial("id").primaryKey(),
+  auctionId: integer("auction_id").notNull().references(() => auctions.id),
+  bondId: integer("bond_id").notNull().references(() => bonds.id),
+  investorId: integer("investor_id").notNull().references(() => users.id),
+  amount: decimal("amount", { precision: 18, scale: 2 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("PENDING"), // PENDING | PAID | SETTLED | FAILED | CANCELLED
+  stripeCheckoutSessionId: varchar("stripe_checkout_session_id", { length: 255 }),
+  stripePaymentIntentId: varchar("stripe_payment_intent_id", { length: 255 }),
+  settlementId: varchar("settlement_id", { length: 255 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+// Settlement records for completed trades
+export const exchangeSettlements = pgTable("exchange_settlements", {
+  id: serial("id").primaryKey(),
+  tradeId: integer("trade_id").notNull().references(() => exchangeTrades.id, { onDelete: "cascade" }),
+  settlementAmount: decimal("settlement_amount", { precision: 18, scale: 2 }).notNull(),
+  settlementMethod: varchar("settlement_method", { length: 50 }).notNull().default("STRIPE"),
+  status: varchar("status", { length: 20 }).notNull().default("PENDING"), // PENDING | COMPLETED | FAILED
+  settledAt: timestamp("settled_at", { withTimezone: true }),
+  metadata: jsonb("metadata").default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+// Bond assignments - tracks ownership slices
+export const bondAssignments = pgTable("bond_assignments", {
+  id: serial("id").primaryKey(),
+  tradeId: integer("trade_id").notNull().references(() => exchangeTrades.id, { onDelete: "cascade" }),
+  bondId: integer("bond_id").notNull().references(() => bonds.id),
+  investorId: integer("investor_id").notNull().references(() => users.id),
+  ownershipPercent: decimal("ownership_percent", { precision: 5, scale: 2 }).notNull(),
+  faceValueAmount: decimal("face_value_amount", { precision: 18, scale: 2 }).notNull(),
+  assignmentDate: timestamp("assignment_date", { withTimezone: true }).defaultNow().notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("ACTIVE"), // ACTIVE | TRANSFERRED | REVOKED
+  transferable: boolean("transferable").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+// Assignment transfers between investors
+export const assignmentTransfers = pgTable("assignment_transfers", {
+  id: serial("id").primaryKey(),
+  assignmentId: integer("assignment_id").notNull().references(() => bondAssignments.id, { onDelete: "cascade" }),
+  fromInvestorId: integer("from_investor_id").notNull().references(() => users.id),
+  toInvestorId: integer("to_investor_id").notNull().references(() => users.id),
+  transferPercent: decimal("transfer_percent", { precision: 5, scale: 2 }).notNull(),
+  transferAmount: decimal("transfer_amount", { precision: 18, scale: 2 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("PENDING"), // PENDING | APPROVED | EXECUTED | REJECTED
+  approvedAt: timestamp("approved_at", { withTimezone: true }),
+  executedAt: timestamp("executed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+// ===== DISTRIBUTION TABLES =====
+export const distributions = pgTable("distributions", {
+  id: serial("id").primaryKey(),
+  bondId: integer("bond_id").notNull().references(() => bonds.id),
+  distributionType: varchar("distribution_type", { length: 50 }).notNull(), // INTEREST | PRINCIPAL | DIVIDEND
+  totalAmount: decimal("total_amount", { precision: 18, scale: 2 }).notNull(),
+  recoupmentAmount: decimal("recoupment_amount", { precision: 18, scale: 2 }).notNull().default("0"),
+  distributionAmount: decimal("distribution_amount", { precision: 18, scale: 2 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("PENDING"), // PENDING | EXECUTED | CANCELLED
+  executedAt: timestamp("executed_at", { withTimezone: true }),
+  metadata: jsonb("metadata").default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+// ===== LEDGER TABLES =====
+export const ledgerAccounts = pgTable("ledger_accounts", {
+  id: serial("id").primaryKey(),
+  accountCode: varchar("account_code", { length: 20 }).notNull().unique(),
+  accountName: varchar("account_name", { length: 255 }).notNull(),
+  accountType: varchar("account_type", { length: 50 }).notNull(), // ASSET | LIABILITY | EQUITY | REVENUE | EXPENSE
+  normalBalance: varchar("normal_balance", { length: 10 }).notNull().default("DEBIT"),
+  description: text("description"),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const ledgerJournalEntries = pgTable("ledger_journal_entries", {
+  id: serial("id").primaryKey(),
+  journalType: varchar("journal_type", { length: 50 }).notNull(),
+  description: text("description").notNull(),
+  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+  journalHash: varchar("journal_hash", { length: 64 }).notNull().unique(),
+  previousHash: varchar("previous_hash", { length: 64 }).notNull(),
+  isBalanced: boolean("is_balanced").notNull().default(true),
+  metadata: jsonb("metadata").default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const ledgerPostings = pgTable("ledger_postings", {
+  id: serial("id").primaryKey(),
+  journalEntryId: integer("journal_entry_id").notNull().references(() => ledgerJournalEntries.id, { onDelete: "cascade" }),
+  accountCode: varchar("account_code", { length: 20 }).notNull().references(() => ledgerAccounts.accountCode),
+  debit: decimal("debit", { precision: 18, scale: 2 }).notNull().default("0"),
+  credit: decimal("credit", { precision: 18, scale: 2 }).notNull().default("0"),
+  description: text("description"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+// ===== IMMUTABLE EVENTS TABLE =====
+export const immutableEvents = pgTable("immutable_events", {
+  id: serial("id").primaryKey(),
+  eventType: varchar("event_type", { length: 100 }).notNull(),
+  actorId: integer("actor_id"),
+  actorType: varchar("actor_type", { length: 50 }).notNull(), // USER | SYSTEM | ADMIN | API
+  entityType: varchar("entity_type", { length: 100 }).notNull(),
+  entityId: varchar("entity_id", { length: 255 }).notNull(),
+  payload: jsonb("payload").notNull(),
+  correlationId: varchar("correlation_id", { length: 255 }),
+  eventHash: varchar("event_hash", { length: 64 }).notNull(),
+  previousHash: varchar("previous_hash", { length: 64 }).notNull(),
+  metadata: jsonb("metadata").default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+// ===== STRIPE WEBHOOKS TABLE =====
+export const stripeWebhooks = pgTable("stripe_webhooks", {
+  id: serial("id").primaryKey(),
+  stripeEventId: varchar("stripe_event_id", { length: 255 }).notNull().unique(),
+  eventType: varchar("event_type", { length: 100 }).notNull(),
+  payload: jsonb("payload").notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("RECEIVED"), // RECEIVED | PROCESSED | FAILED
+  processedAt: timestamp("processed_at", { withTimezone: true }),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
 // Relations
 export const usersRelations = relations(users, ({ many }) => ({
   judgments: many(judgments),
@@ -502,6 +634,88 @@ export const bondProcessDocumentsRelations = relations(bondProcessDocuments, ({ 
   }),
 }));
 
+// Exchange trade relations
+export const exchangeTradesRelations = relations(exchangeTrades, ({ one, many }) => ({
+  auction: one(auctions, {
+    fields: [exchangeTrades.auctionId],
+    references: [auctions.id],
+  }),
+  bond: one(bonds, {
+    fields: [exchangeTrades.bondId],
+    references: [bonds.id],
+  }),
+  investor: one(users, {
+    fields: [exchangeTrades.investorId],
+    references: [users.id],
+  }),
+  settlements: many(exchangeSettlements),
+  assignments: many(bondAssignments),
+}));
+
+export const exchangeSettlementsRelations = relations(exchangeSettlements, ({ one }) => ({
+  trade: one(exchangeTrades, {
+    fields: [exchangeSettlements.tradeId],
+    references: [exchangeTrades.id],
+  }),
+}));
+
+export const bondAssignmentsRelations = relations(bondAssignments, ({ one, many }) => ({
+  trade: one(exchangeTrades, {
+    fields: [bondAssignments.tradeId],
+    references: [exchangeTrades.id],
+  }),
+  bond: one(bonds, {
+    fields: [bondAssignments.bondId],
+    references: [bonds.id],
+  }),
+  investor: one(users, {
+    fields: [bondAssignments.investorId],
+    references: [users.id],
+  }),
+  transfers: many(assignmentTransfers),
+}));
+
+export const assignmentTransfersRelations = relations(assignmentTransfers, ({ one }) => ({
+  assignment: one(bondAssignments, {
+    fields: [assignmentTransfers.assignmentId],
+    references: [bondAssignments.id],
+  }),
+  fromInvestor: one(users, {
+    fields: [assignmentTransfers.fromInvestorId],
+    references: [users.id],
+  }),
+  toInvestor: one(users, {
+    fields: [assignmentTransfers.toInvestorId],
+    references: [users.id],
+  }),
+}));
+
+export const distributionsRelations = relations(distributions, ({ one }) => ({
+  bond: one(bonds, {
+    fields: [distributions.bondId],
+    references: [bonds.id],
+  }),
+}));
+
+export const ledgerAccountsRelations = relations(ledgerAccounts, ({ many }) => ({
+  postings: many(ledgerPostings),
+}));
+
+export const ledgerJournalEntriesRelations = relations(ledgerJournalEntries, ({ many }) => ({
+  postings: many(ledgerPostings),
+}));
+
+export const ledgerPostingsRelations = relations(ledgerPostings, ({ one }) => ({
+  journalEntry: one(ledgerJournalEntries, {
+    fields: [ledgerPostings.journalEntryId],
+    references: [ledgerJournalEntries.id],
+  }),
+  account: one(ledgerAccounts, {
+    fields: [ledgerPostings.accountCode],
+    references: [ledgerAccounts.accountCode],
+  }),
+}));
+
 // Insert schemas and types
 export const insertUserSchema = createInsertSchema(users).omit({
   id: true,
@@ -640,6 +854,58 @@ export const insertBondProcessDocumentSchema = createInsertSchema(bondProcessDoc
   createdAt: true,
 });
 
+// Exchange settlement insert schemas
+export const insertExchangeTradeSchema = createInsertSchema(exchangeTrades).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertExchangeSettlementSchema = createInsertSchema(exchangeSettlements).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertBondAssignmentSchema = createInsertSchema(bondAssignments).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertAssignmentTransferSchema = createInsertSchema(assignmentTransfers).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertDistributionSchema = createInsertSchema(distributions).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertLedgerAccountSchema = createInsertSchema(ledgerAccounts).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertLedgerJournalEntrySchema = createInsertSchema(ledgerJournalEntries).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertLedgerPostingSchema = createInsertSchema(ledgerPostings).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertImmutableEventSchema = createInsertSchema(immutableEvents).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertStripeWebhookSchema = createInsertSchema(stripeWebhooks).omit({
+  id: true,
+  createdAt: true,
+});
+
 // ===== REAL DATA VALIDATION SCHEMAS =====
 // These schemas enforce the "real data only" policy by requiring critical fields
 // and rejecting requests with incomplete data instead of allowing null/undefined values.
@@ -739,6 +1005,44 @@ export type InsertSuretyDocument = z.infer<typeof insertSuretyDocumentSchema>;
 
 export type BondProcessDocument = typeof bondProcessDocuments.$inferSelect;
 export type InsertBondProcessDocument = z.infer<typeof insertBondProcessDocumentSchema>;
+
+// Exchange settlement types
+export type ExchangeTrade = typeof exchangeTrades.$inferSelect;
+export type InsertExchangeTrade = z.infer<typeof insertExchangeTradeSchema>;
+
+export type ExchangeSettlement = typeof exchangeSettlements.$inferSelect;
+export type InsertExchangeSettlement = z.infer<typeof insertExchangeSettlementSchema>;
+
+export type BondAssignment = typeof bondAssignments.$inferSelect;
+export type InsertBondAssignment = z.infer<typeof insertBondAssignmentSchema>;
+
+export type AssignmentTransfer = typeof assignmentTransfers.$inferSelect;
+export type InsertAssignmentTransfer = z.infer<typeof insertAssignmentTransferSchema>;
+
+export type Distribution = typeof distributions.$inferSelect;
+export type InsertDistribution = z.infer<typeof insertDistributionSchema>;
+
+export type LedgerAccount = typeof ledgerAccounts.$inferSelect;
+export type InsertLedgerAccount = z.infer<typeof insertLedgerAccountSchema>;
+
+export type LedgerJournalEntry = typeof ledgerJournalEntries.$inferSelect;
+export type InsertLedgerJournalEntry = z.infer<typeof insertLedgerJournalEntrySchema>;
+
+export type LedgerPosting = typeof ledgerPostings.$inferSelect;
+export type InsertLedgerPosting = z.infer<typeof insertLedgerPostingSchema>;
+
+export type ImmutableEvent = typeof immutableEvents.$inferSelect;
+export type InsertImmutableEvent = z.infer<typeof insertImmutableEventSchema>;
+
+export type StripeWebhook = typeof stripeWebhooks.$inferSelect;
+export type InsertStripeWebhook = z.infer<typeof insertStripeWebhookSchema>;
+
+// Trade and assignment statuses
+export type TradeStatus = "PENDING" | "PAID" | "SETTLED" | "FAILED" | "CANCELLED";
+export type AssignmentStatus = "ACTIVE" | "TRANSFERRED" | "REVOKED";
+export type TransferStatus = "PENDING" | "APPROVED" | "EXECUTED" | "REJECTED";
+export type DistributionStatus = "PENDING" | "EXECUTED" | "CANCELLED";
+export type SettlementStatus = "PENDING" | "COMPLETED" | "FAILED";
 
 export type BondProcessStep = 
   | "JUDGMENT_TO_BOND"

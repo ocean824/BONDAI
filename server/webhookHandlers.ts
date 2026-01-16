@@ -126,9 +126,61 @@ export class WebhookHandlers {
   static async handleCheckoutCompleted(session: any): Promise<void> {
     const userId = session.metadata?.userId;
     const tier = session.metadata?.tier;
+    const purpose = session.metadata?.purpose;
+    const tradeId = session.metadata?.tradeId;
     const subscriptionId = session.subscription;
     const customerId = session.customer;
 
+    // Handle bond purchase checkout completion
+    if (purpose === "bond_purchase" && tradeId) {
+      console.log(`Bond purchase checkout completed for trade ${tradeId}`);
+
+      try {
+        const { updateTradeStatus, createSettlement } = await import('./services/tradeService');
+        const { getTradeById } = await import('./services/tradeService');
+        const { db } = await import('./db');
+        const { users, bonds } = await import('@shared/schema');
+        const { eq } = await import('drizzle-orm');
+
+        // Update trade status to PAID
+        await updateTradeStatus(parseInt(tradeId), "PAID", {
+          paymentIntentId: session.payment_intent
+        });
+
+        const trade = await getTradeById(parseInt(tradeId));
+        if (!trade) {
+          console.error(`Trade ${tradeId} not found`);
+          return;
+        }
+
+        // Get investor and bond details for settlement
+        const [investor] = await db
+          .select({ email: users.email, name: users.name })
+          .from(users)
+          .where(eq(users.id, trade.investorId));
+
+        const [bond] = await db
+          .select({ name: bonds.name })
+          .from(bonds)
+          .where(eq(bonds.id, trade.bondId));
+
+        // Create settlement with ledger entries
+        const settlement = await createSettlement(
+          parseInt(tradeId),
+          investor?.email || "",
+          investor?.name || "",
+          bond?.name || ""
+        );
+
+        console.log(`Trade ${tradeId} settled:`, settlement);
+        return;
+      } catch (error) {
+        console.error(`Error processing bond purchase settlement for trade ${tradeId}:`, error);
+        throw error; // Re-throw to trigger webhook retry
+      }
+    }
+
+    // Handle subscription checkout completion
     if (userId && tier) {
       console.log(`Checkout completed for user ${userId} - tier: ${tier}`);
       

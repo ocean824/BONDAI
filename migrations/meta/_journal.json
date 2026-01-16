@@ -8,6 +8,20 @@
       "when": 1763567908908,
       "tag": "0000_safe_omega_flight",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1736894400000,
+      "tag": "0001_add_missing_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1736895000000,
+      "tag": "0002_exchange_settlement_ledger",
+      "breakpoints": true
     }
   ]
 }
